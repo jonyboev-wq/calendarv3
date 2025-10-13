@@ -1,18 +1,27 @@
 import { uid, clone } from "./utils/misc";
 import { addMinutes, diffMinutes, parseISOorNull, startOfDay, sameDay } from "./utils/date";
 import type {
-  EventItem,
-  Task,
-  TaskEvent,
+  CalendarEvent,
+  PlannerStoredTask,
+  PlannerTaskEvent,
   TaskCalendarType,
-} from "./types";
+} from "./domain";
+import {
+  TASK_DAY_START_HOUR,
+  TASK_DAY_END_HOUR,
+  BREAK_GAP_MIN,
+  MAX_TASK_EVENTS_PER_DAY,
+} from "./config/timeWindows";
+
+type EventItem = CalendarEvent;
+type Task = PlannerStoredTask;
+type TaskEvent = PlannerTaskEvent;
 
 const TASK_STORAGE_KEY = "mycalendar.tasks";
 const EVENT_STORAGE_KEY = "mycalendar.events";
-const BREAK_MINUTES = 10;
-const MAX_TASK_EVENTS_PER_DAY = 5;
-const DEFAULT_DAY_START = 8; // 08:00
-const DEFAULT_DAY_END = 22; // 22:00
+const BREAK_MINUTES = BREAK_GAP_MIN;
+const DEFAULT_DAY_START = TASK_DAY_START_HOUR;
+const DEFAULT_DAY_END = TASK_DAY_END_HOUR;
 
 type StorageProvider = {
   getItem(key: string): string | null;
@@ -34,7 +43,7 @@ type InternalEvent = EventItem | TaskEvent;
 const calendarFamilyMap: Record<TaskCalendarType, EventItem["family"]> = {
   study: "study",
   work: "work",
-  personal: "life",
+  personal: "home",
 };
 
 const isTaskEvent = (event: EventItem): event is TaskEvent =>
@@ -227,7 +236,7 @@ export class TaskPlanner {
     const calendarType = (["study", "work", "personal"] as TaskCalendarType[]).includes(item.calendarType)
       ? (item.calendarType as TaskCalendarType)
       : "personal";
-    const priority = Math.min(10, Math.max(1, Number(item.priority) || 1));
+    const priority = Math.min(5, Math.max(1, Number(item.priority) || 1)) as Task["priority"];
     const parts = Array.isArray(item.parts)
       ? item.parts.map((part: any) => String(part)).filter(Boolean)
       : [];
@@ -238,7 +247,6 @@ export class TaskPlanner {
       title,
       totalDuration,
       deadline,
-      linkedEventId: typeof item.linkedEventId === "string" ? item.linkedEventId : undefined,
       calendarType,
       priority,
       parts,
@@ -507,3 +515,4 @@ export const optimizeFlexibleEvents = (calendarType: TaskCalendarType) =>
   defaultPlanner.optimizeFlexibleEvents(calendarType);
 export const findNextFreeSlot = (duration: number, day: Date, calendarType: TaskCalendarType) =>
   defaultPlanner.findNextFreeSlot(duration, day, calendarType);
+

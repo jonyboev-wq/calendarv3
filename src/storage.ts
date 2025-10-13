@@ -1,4 +1,4 @@
-import type { EventItem, FamilyKey, Task } from "./types";
+import type { EventItem, FamilyKey, Task, TaskEvent } from "./types";
 
 const EVENTS_KEY = "calendar.events";
 const TASKS_KEY = "calendar.tasks";
@@ -20,6 +20,24 @@ export function isValidISO(s: unknown): s is string {
   }
   const timestamp = Date.parse(s);
   return !Number.isNaN(timestamp);
+}
+
+/**
+ * Convert a value into a normalized ISO string (or null if invalid).
+ * - Accepts an ISO string or a Date instance.
+ * - Always returns `toISOString()` (UTC) when valid.
+ */
+export function sanitizeISODate(value: unknown): string | null {
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isFinite(t) ? new Date(t).toISOString() : null;
+  }
+  if (typeof value === "string") {
+    if (!isValidISO(value)) return null;
+    const t = Date.parse(value);
+    return Number.isNaN(t) ? null : new Date(t).toISOString();
+  }
+  return null;
 }
 
 /**
@@ -107,6 +125,11 @@ function sanitizeEvent(value: unknown): EventItem | null {
 
   if (typeof event.notes === "string" && event.notes.trim().length > 0) {
     sanitized.notes = event.notes;
+  }
+
+  if (typeof (event as any).taskId === "string") {
+    (sanitized as TaskEvent).taskId = (event as any).taskId;
+    (sanitized as TaskEvent).done = Boolean((event as any).done);
   }
 
   return sanitized;

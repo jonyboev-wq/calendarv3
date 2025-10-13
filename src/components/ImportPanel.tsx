@@ -1,5 +1,5 @@
 import { memo, type Dispatch, type SetStateAction } from "react";
-import type { CalendarInfo } from "../types";
+import type { CalendarInfo } from "../domain";
 
 type ImportPanelProps = {
   calendars: CalendarInfo[];

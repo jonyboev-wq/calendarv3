@@ -1,16 +1,18 @@
 import { memo, type Dispatch, type SetStateAction } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { DaySlice, EventItem, CalendarInfoMap } from "../types";
+import type { DaySlice, CalendarEvent, CalendarInfoMap } from "../domain";
+import type { TaskEvent } from "../types";
 import { fmtHM, fmtDay } from "../utils/date";
 import { familyBadgeColor, familyLabel } from "../utils/family";
 
 type DragState = { id: string; dayKey: string; offsetMinutes: number; duration: number; originalMinutes: number } | null;
 
+type EventItem = CalendarEvent;
+
 export type DayColumnProps = {
   daySlices: Map<string, DaySlice[]>;
   day: Date;
   todayKey: string;
-  dateToMinutes: (date: Date) => number;
   dayStartHour: number;
   minutesPerDay: number;
   minuteUnit: number;
@@ -43,13 +45,15 @@ export type DayColumnProps = {
   timeColumnWidth: number;
   now: Date;
   familyCardStyle: (family: EventItem["family"], fixed: boolean) => string;
+  taskProgress: Map<string, { total: number; done: number }>;
+  onTaskEventDone: (eventId: string) => void;
+  onTaskEventUndone: (eventId: string) => void;
 };
 
 export const DayColumn = memo(function DayColumn({
   daySlices,
   day,
   todayKey,
-  dateToMinutes,
   dayStartHour,
   minutesPerDay,
   minuteUnit,
@@ -82,17 +86,22 @@ export const DayColumn = memo(function DayColumn({
   timeColumnWidth,
   now,
   familyCardStyle,
+  taskProgress,
+  onTaskEventDone,
+  onTaskEventUndone,
 }: DayColumnProps) {
   const dayStart = startOfDay(day);
   const dayKey = dayStart.toISOString();
   const slices = daySlices.get(dayKey) ?? [];
   const isTodayColumn = dayKey === todayKey;
-  const nowMinutesForColumn = Math.max(0, dateToMinutes(now) - dayStartHour * 60);
-  const inNowRange = nowMinutesForColumn >= 0 && nowMinutesForColumn <= minutesPerDay;
+  const workingStart = new Date(dayStart);
+  workingStart.setHours(dayStartHour, 0, 0, 0);
+  const minutesFromStart = (now.getTime() - workingStart.getTime()) / 60000;
+  const nowMinutesForColumn = Math.max(0, minutesFromStart);
+  const inNowRange = minutesFromStart >= 0 && minutesFromStart <= minutesPerDay;
   const nowTopPx = DAY_COLUMN_OFFSET + nowMinutesForColumn * minuteUnit;
-  const baseNowLineThickness = 2;
-  const nowLineThickness = isTodayColumn ? baseNowLineThickness / 1.5 : baseNowLineThickness / 2;
-  const nowLineOpacity = isTodayColumn ? 1 : 0.45;
+  const nowLineThickness = 1;
+  const nowLineOpacity = isTodayColumn ? 1 : 0.5;
   const nowBadgeLeft = -timeColumnWidth + 12;
 
   const handleDoubleClick = (ev: React.MouseEvent<HTMLDivElement>) => {
@@ -127,17 +136,16 @@ export const DayColumn = memo(function DayColumn({
               opacity: nowLineOpacity,
             }}
           />
-          {isTodayColumn && (
-            <>
-              <div className="absolute -left-2 h-2 w-2 rounded-full bg-red-500" style={{ top: 0, transform: "translateY(-50%)" }} />
-              <div
-                className="absolute rounded-md border border-red-500/20 bg-red-500 px-2 py-0.5 text-[10px] leading-none text-white shadow-[0_8px_20px_rgba(255,59,48,0.35)]"
-                style={{ top: 0, left: `${nowBadgeLeft}px`, transform: "translateY(-50%)" }}
-              >
-                {fmtHM(now)}
-              </div>
-            </>
-          )}
+          <div
+            className="absolute -left-2 h-2 w-2 rounded-full bg-red-500"
+            style={{ top: 0, transform: "translateY(-50%)", opacity: nowLineOpacity }}
+          />
+          <div
+            className="absolute rounded-md border border-red-500/20 bg-red-500 px-2 py-0.5 text-[10px] leading-none text-white shadow-[0_8px_20px_rgba(255,59,48,0.35)]"
+            style={{ top: 0, left: `${nowBadgeLeft}px`, transform: "translateY(-50%)", opacity: nowLineOpacity }}
+          >
+            {fmtHM(now)}
+          </div>
         </div>
       )}
       {slices.map((slice) => (
@@ -145,6 +153,7 @@ export const DayColumn = memo(function DayColumn({
           key={`${slice.event.id}-${slice.sliceStart.toISOString()}`}
           slice={slice}
           dayStart={dayStart}
+          dayStartHour={dayStartHour}
           minuteUnit={minuteUnit}
           DAY_COLUMN_OFFSET={DAY_COLUMN_OFFSET}
           dragPreview={dragPreview}
@@ -170,6 +179,9 @@ export const DayColumn = memo(function DayColumn({
           setDraft={setDraft}
           optimizeDay={optimizeDay}
           now={now}
+          taskProgress={taskProgress}
+          onTaskEventDone={onTaskEventDone}
+          onTaskEventUndone={onTaskEventUndone}
         />
       ))}
     </div>
@@ -179,6 +191,7 @@ export const DayColumn = memo(function DayColumn({
 type EventSliceCardProps = {
   slice: DaySlice;
   dayStart: Date;
+  dayStartHour: number;
   minuteUnit: number;
   DAY_COLUMN_OFFSET: number;
   dragPreview: DayColumnProps["dragPreview"];
@@ -204,11 +217,15 @@ type EventSliceCardProps = {
   setDraft: DayColumnProps["setDraft"];
   optimizeDay: DayColumnProps["optimizeDay"];
   now: Date;
+  taskProgress: Map<string, { total: number; done: number }>;
+  onTaskEventDone: (eventId: string) => void;
+  onTaskEventUndone: (eventId: string) => void;
 };
 
 const EventSliceCard = memo(function EventSliceCard({
   slice,
   dayStart,
+  dayStartHour,
   minuteUnit,
   DAY_COLUMN_OFFSET,
   dragPreview,
@@ -234,17 +251,29 @@ const EventSliceCard = memo(function EventSliceCard({
   setDraft,
   optimizeDay,
   now,
+  taskProgress,
+  onTaskEventDone,
+  onTaskEventUndone,
 }: EventSliceCardProps) {
   const e = slice.event;
   const eventStart = parseISOorNull(e.start) ?? slice.sliceStart;
   const eventEnd = parseISOorNull(e.end) ?? slice.sliceEnd;
   const fullDurationMinutes = Math.max(1, diffMinutes(eventEnd, eventStart));
   const nowTime = now.getTime();
-  const canAddTask = eventStart.getTime() > nowTime;
-  const sliceStartMinutes = Math.max(0, diffMinutes(slice.sliceStart, dayStart));
+  const taskId = (e as TaskEvent).taskId;
+  const isTaskEvent = typeof taskId === "string" && taskId.length > 0;
+  const isTaskDone = Boolean((e as TaskEvent).done);
+  const taskStats = isTaskEvent ? taskProgress.get(taskId!) : undefined;
+  const rawTaskTotal = taskStats?.total ?? (isTaskEvent ? 1 : 0);
+  const taskTotal = isTaskEvent ? Math.max(1, rawTaskTotal) : rawTaskTotal;
+  const taskDoneCount = taskStats?.done ?? (isTaskEvent && isTaskDone ? 1 : 0);
+  const canAddTask = !isTaskEvent && eventStart.getTime() > nowTime;
+  const workingStartForEvent = new Date(dayStart);
+  workingStartForEvent.setHours(dayStartHour, 0, 0, 0);
+  const sliceStartMinutes = Math.max(0, diffMinutes(slice.sliceStart, workingStartForEvent));
   const effectivePreview =
     dragPreview && dragPreview.id === e.id && dragPreview.dayKey === dayStart.toISOString() ? dragPreview.startMinutes : null;
-  const eventStartMinutes = Math.max(0, diffMinutes(eventStart, dayStart));
+  const eventStartMinutes = Math.max(0, diffMinutes(eventStart, workingStartForEvent));
   const startBase = effectivePreview ?? (slice.continuesFromPrev ? sliceStartMinutes : eventStartMinutes);
   const startMinutes = Math.max(0, startBase);
   const visibleDurationMinutes = Math.max(1, diffMinutes(slice.sliceEnd, slice.sliceStart));
@@ -325,11 +354,21 @@ const EventSliceCard = memo(function EventSliceCard({
       onPointerDown={handlePointerDown}
     >
       <div className="relative h-full overflow-visible">
-        <div className={`flex h-full flex-col justify-between p-3 transition duration-200 ease-out ${isActive ? "opacity-20" : ""}`}>
+        <div
+          className={`flex h-full flex-col justify-between p-3 transition duration-200 ease-out ${
+            isActive ? "opacity-20" : isTaskEvent && isTaskDone ? "opacity-60" : ""
+          }`}
+        >
           <div className="space-y-1 overflow-hidden">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 space-y-1">
-                <div className="text-sm font-semibold text-gray-100 line-clamp-2">{e.title}</div>
+                <div
+                  className={`text-sm font-semibold text-gray-100 line-clamp-2 ${
+                    isTaskEvent && isTaskDone ? "line-through text-gray-300" : ""
+                  }`}
+                >
+                  {e.title}
+                </div>
                 <div className="text-xs text-gray-300 whitespace-nowrap">
                   {fmtHM(startDisplay)}–{fmtHM(endDisplay)}
                 </div>
@@ -338,9 +377,23 @@ const EventSliceCard = memo(function EventSliceCard({
                   <span className="truncate">{calendarName}</span>
                 </div>
               </div>
-              <span className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${familyBadgeColor(e.family)}`}>
-                {familyLabel(e.family)}
-              </span>
+              <div className="flex flex-col items-end gap-1">
+                {isTaskEvent && (
+                  <div
+                    className={`inline-flex items-center gap-1 rounded-full border border-emerald-400/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-200 ${
+                      isTaskDone ? "opacity-80" : ""
+                    }`}
+                  >
+                    <span>Task</span>
+                    <span>
+                      {taskDoneCount}/{taskTotal}
+                    </span>
+                  </div>
+                )}
+                <span className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${familyBadgeColor(e.family)}`}>
+                  {familyLabel(e.family)}
+                </span>
+              </div>
             </div>
             {e.linkedTaskId && (
               <a
@@ -354,7 +407,41 @@ const EventSliceCard = memo(function EventSliceCard({
                 Открыть связанную задачу
               </a>
             )}
-            {meta.location && (
+        {isTaskEvent && (
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center justify-between text-[11px] text-emerald-200">
+              <span className="uppercase tracking-wide">Task</span>
+              <span className="font-semibold">
+                {taskDoneCount}/{taskTotal}
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="pressable rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-200 transition hover:bg-emerald-500/20 disabled:opacity-50"
+                disabled={isTaskDone}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onTaskEventDone(e.id);
+                  setActiveEventId(null);
+                }}
+              >
+                ✔ Сделал
+              </button>
+              <button
+                className="pressable rounded-lg border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200 transition hover:bg-amber-500/20 disabled:opacity-50"
+                disabled={!isTaskDone}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onTaskEventUndone(e.id);
+                  setActiveEventId(null);
+                }}
+              >
+                ✖ Не сделал
+              </button>
+            </div>
+          </div>
+        )}
+        {meta.location && (
               <div className="text-xs text-gray-300 flex items-center gap-1 overflow-hidden">
                 <span className="inline-block h-1.5 w-1.5 rounded-full bg-gray-400 shrink-0" />
                 <span className="truncate">{meta.location}</span>

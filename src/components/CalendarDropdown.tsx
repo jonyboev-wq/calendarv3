@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { CalendarInfo } from "../types";
+import type { CalendarInfo } from "../domain";
 
 type CalendarDropdownProps = {
   calendars: CalendarInfo[];

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useLayoutEffect } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect } from "react";
 import { scheduleRequests, type ScheduleRequest, type ExistingEvent, type PriorityLevel } from "./scheduler";
 import { CalendarHeader } from "./components/CalendarHeader";
 import { CalendarGrid } from "./components/CalendarGrid";
@@ -7,17 +7,21 @@ import { EventFormDrawer } from "./components/EventFormDrawer";
 import { ImportPanel } from "./components/ImportPanel";
 import { CalendarsPanel } from "./components/CalendarsPanel";
 import { TaskPanel } from "./components/TaskPanel";
+import { AddTaskForm } from "./components/AddTaskForm";
+import type { FamilyKey, Task as StoredTask, TaskEvent } from "./types";
 import type {
   CalendarInfo,
-  EventItem,
+  CalendarEvent,
   PlannerTask,
   DaySlice,
-  FamilyKey,
   CalendarInfoMap,
   TaskAssignment,
   TaskCreateInput,
   TaskCreateResult,
-} from "./types";
+} from "./domain";
+import { TASK_DAY_START_HOUR, TASK_DAY_END_HOUR } from "./config/timeWindows";
+
+type EventItem = CalendarEvent;
 import { uid, clone } from "./utils/misc";
 import {
   fmtDay,
@@ -34,6 +38,7 @@ import {
 } from "./utils/date";
 import { familyLabel, familyCardStyle } from "./utils/family";
 import { extractEventMeta } from "./utils/events";
+import { createTask, markTaskEventDone, markTaskEventUndone } from "./taskService";
 
 const DEFAULT_CALENDAR_ID = "cal-default";
 
@@ -56,13 +61,14 @@ const DEFAULT_CALENDAR: CalendarInfo = {
 
 const TASK_SINGLE_THRESHOLD_MIN = 120;
 const TASK_MAX_CHUNK_MIN = 80;
-const TASK_DAY_START_HOUR = 7;
-const TASK_DAY_END_HOUR = 22;
+const EVENTS_STORAGE_KEY = "mycalendar.events";
 const TASK_STORAGE_KEY = "mycalendar.taskAssignments";
 
-const sanitizeEvents = (raw: unknown): EventItem[] => {
+const FAMILY_VALUES: FamilyKey[] = ["study", "work", "training", "home"];
+
+const sanitizeEvents = (raw: unknown): CalendarEvent[] => {
   const arr = Array.isArray(raw) ? (raw as any[]) : [];
-  const out: EventItem[] = [];
+  const out: CalendarEvent[] = [];
   for (const e of arr) {
     if (!e || typeof e !== "object") continue;
     const s = parseISOorNull((e as any).start);
@@ -73,23 +79,38 @@ const sanitizeEvents = (raw: unknown): EventItem[] => {
       typeof (e as any).linkedTaskId === "string" && (e as any).linkedTaskId.trim()
         ? (e as any).linkedTaskId.trim()
         : undefined;
+    const taskId =
+      typeof (e as any).taskId === "string" && (e as any).taskId.trim() ? (e as any).taskId.trim() : undefined;
+    const done = typeof (e as any).done === "boolean" ? (e as any).done : false;
     out.push({
       id: String((e as any).id ?? uid()),
       title: String((e as any).title ?? ""),
       start: s.toISOString(),
       end: en.toISOString(),
       type: ((e as any).type === "fixed" ? "fixed" : "flexible") as "fixed" | "flexible",
-      priority: Math.max(1, Math.min(10, Number((e as any).priority ?? 5))) || 5,
+      priority: (Math.max(1, Math.min(5, Number((e as any).priority ?? 3))) || 3) as CalendarEvent["priority"],
       family: ((): FamilyKey => {
         const f = (e as any).family;
-        return ["study", "work", "health", "life", "other"].includes(f) ? f : "other";
+        return FAMILY_VALUES.includes(f) ? (f as FamilyKey) : "home";
       })(),
       notes: typeof (e as any).notes === "string" ? (e as any).notes : "",
       calendarId: String((e as any).calendarId ?? DEFAULT_CALENDAR_ID),
       linkedTaskId,
+      taskId,
+      done,
     });
   }
   return out;
+};
+
+const readStoredEvents = (): CalendarEvent[] => {
+  try {
+    const raw = localStorage.getItem(EVENTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return sanitizeEvents(parsed);
+  } catch {
+    return [];
+  }
 };
 
 const sanitizeCalendars = (raw: unknown): CalendarInfo[] => {
@@ -733,13 +754,7 @@ export default function CalendarApp() {
       return DEFAULT_CALENDAR_ID;
     }
   });
-  const [events, setEvents] = useState<EventItem[]>(() => {
-    try {
-      const raw = localStorage.getItem("mycalendar.events");
-      const parsed = raw ? JSON.parse(raw) : [];
-      return sanitizeEvents(parsed);
-    } catch { return []; }
-  });
+  const [events, setEvents] = useState<EventItem[]>(() => readStoredEvents());
   const [taskAssignments, setTaskAssignments] = useState<TaskAssignment[]>(() => {
     try {
       const raw = localStorage.getItem(TASK_STORAGE_KEY);
@@ -761,6 +776,7 @@ export default function CalendarApp() {
   const [taskPanelMessage, setTaskPanelMessage] = useState<string | null>(null);
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
   const [taskSeed, setTaskSeed] = useState<{ eventId: string; title: string } | null>(null);
+  const [taskStatus, setTaskStatus] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{
     id: string;
     dayKey: string;
@@ -802,6 +818,7 @@ export default function CalendarApp() {
   const draggingRef = useRef(false);
   const suppressClickRef = useRef(false);
   const calendarSwipeRef = useRef<HTMLDivElement | null>(null);
+  const autoScrolledRef = useRef(false);
   const updatePlannerTask = (id: string, patch: Partial<PlannerTask>) => {
     setPlannerTasks((prev) => prev.map((task) => (task.id === id ? { ...task, ...patch } : task)));
   };
@@ -814,6 +831,15 @@ export default function CalendarApp() {
   const addPlannerTask = () => {
     setPlannerTasks((prev) => [...prev, makePlannerTask()]);
   };
+  const refreshEventsFromStorage = useCallback(() => {
+    setEvents(readStoredEvents());
+  }, []);
+
+  useEffect(() => {
+    if (!taskStatus) return;
+    const timeout = window.setTimeout(() => setTaskStatus(null), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [taskStatus]);
 
   useLayoutEffect(() => {
     const firstEvent = events
@@ -888,7 +914,7 @@ export default function CalendarApp() {
   }, [calendars]);
 
   useEffect(() => {
-    localStorage.setItem("mycalendar.events", JSON.stringify(events));
+    localStorage.setItem(EVENTS_STORAGE_KEY, JSON.stringify(events));
   }, [events]);
 
   useEffect(() => {
@@ -940,7 +966,7 @@ export default function CalendarApp() {
       end: end.toISOString(),
       type: "flexible",
       priority: 5,
-      family: "other",
+      family: "home",
       calendarId: activeCalendarId,
     });
     setShowForm(true);
@@ -962,8 +988,8 @@ export default function CalendarApp() {
       start: s.toISOString(),
       end: e.toISOString(),
       type,
-      priority: Math.max(1, Math.min(10, draft.priority ?? 5)),
-      family: (draft.family as FamilyKey) ?? "other",
+      priority: Math.max(1, Math.min(5, draft.priority ?? 3)) as EventItem["priority"],
+      family: (draft.family as FamilyKey) ?? "home",
       notes: draft.notes ?? "",
       calendarId:
         typeof draft.calendarId === "string" && calendars.some((cal) => cal.id === draft.calendarId)
@@ -1228,8 +1254,8 @@ export default function CalendarApp() {
           start: plan.start.toISOString(),
           end: plan.end.toISOString(),
           type: "flexible" as const,
-          priority: Math.min(10, plan.priority * 2),
-          family: "other" as const,
+          priority: Math.min(5, plan.priority * 2) as EventItem["priority"],
+          family: "home" as const,
           notes,
           calendarId,
         } satisfies EventItem;
@@ -1326,8 +1352,8 @@ export default function CalendarApp() {
         start: slot.start.toISOString(),
         end: slot.end.toISOString(),
         type: "fixed",
-        priority: Math.max(1, Math.min(10, anchor.priority ?? 5)),
-        family: anchor.family ?? "other",
+        priority: (Math.max(1, Math.min(5, anchor.priority ?? 3)) as EventItem["priority"]),
+        family: anchor.family ?? "home",
         notes: notesLines.join("\n"),
         calendarId: anchor.calendarId,
         linkedTaskId: taskId,
@@ -1469,6 +1495,10 @@ export default function CalendarApp() {
   };
   const handleOpenTasks = () => openTasksPanel();
   const handleAddTaskForEvent = (event: EventItem) => {
+    if ((event as TaskEvent).taskId) {
+      setTaskStatus("Это событие уже связано с задачей.");
+      return;
+    }
     const startDate = parseISOorNull(event.start);
     if (!startDate || startDate.getTime() <= now.getTime()) {
       setTaskPanelMessage("Событие уже началось или прошло, добавьте задачу вручную.");
@@ -1485,14 +1515,61 @@ export default function CalendarApp() {
     setImportMessage(null);
     setImportCalendarId(activeCalendarId);
   };
+  const handleAddTaskSubmit = useCallback(
+    async (input: Omit<StoredTask, "id" | "parts">) => {
+      try {
+        const result = createTask(input, { events });
+        refreshEventsFromStorage();
+        const slots = result.newEvents.length;
+        const slotLabel =
+          slots % 10 === 1 && slots % 100 !== 11
+            ? "слот"
+            : slots % 10 >= 2 && slots % 10 <= 4 && (slots % 100 < 10 || slots % 100 >= 20)
+            ? "слота"
+            : "слотов";
+        setTaskStatus(`Задача "${result.task.title}" запланирована (${slots} ${slotLabel}).`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Не удалось создать задачу.";
+        setTaskStatus(message);
+        throw (error instanceof Error ? error : new Error(message));
+      }
+    },
+    [events, refreshEventsFromStorage]
+  );
+  const handleTaskEventDone = useCallback(
+    (eventId: string) => {
+      try {
+        markTaskEventDone(eventId);
+        refreshEventsFromStorage();
+        setTaskStatus("Слот задачи отмечен как выполненный.");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Не удалось отметить выполнение.";
+        setTaskStatus(message);
+      }
+    },
+    [refreshEventsFromStorage]
+  );
+  const handleTaskEventUndone = useCallback(
+    (eventId: string) => {
+      try {
+        markTaskEventUndone(eventId);
+        refreshEventsFromStorage();
+        setTaskStatus("Слот задачи возвращён в план.");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Не удалось вернуть слот.";
+        setTaskStatus(message);
+      }
+    },
+    [refreshEventsFromStorage]
+  );
   const handleToggleCalendarVisibility = (id: string, visible: boolean) => {
     patchCalendar(id, { visible });
   };
-  const dayStartHour = 0;
-  const dayEndHour = 24;
+  const dayStartHour = TASK_DAY_START_HOUR;
+  const dayEndHour = TASK_DAY_END_HOUR;
   const timeColumnWidth = 80;
   const minutesPerDay = (dayEndHour - dayStartHour) * 60;
-  const minuteUnit = 1.2;
+  const minuteUnit = 1;
   const dayColumnHeight = minutesPerDay * minuteUnit;
   const DAY_COLUMN_OFFSET = 72;
   const todayKey = startOfDay(now).toISOString();
@@ -1510,20 +1587,21 @@ export default function CalendarApp() {
       const endDate = parseISOorNull(event.end);
       if (!startDate || !endDate || endDate <= startDate) return;
       weekDays.forEach((day) => {
-        const dayStart = startOfDay(day);
-        const dayEnd = addMinutes(dayStart, minutesPerDay);
-        if (endDate <= dayStart || startDate >= dayEnd) return;
-        const key = dayStart.toISOString();
+        const baseStart = startOfDay(day);
+        const workingStart = addMinutes(baseStart, dayStartHour * 60);
+        const workingEnd = addMinutes(workingStart, minutesPerDay);
+        if (endDate <= workingStart || startDate >= workingEnd) return;
+        const key = baseStart.toISOString();
         const slices = map.get(key);
         if (!slices) return;
-        const sliceStart = startDate > dayStart ? startDate : dayStart;
-        const sliceEnd = endDate < dayEnd ? endDate : dayEnd;
+        const sliceStart = startDate > workingStart ? startDate : workingStart;
+        const sliceEnd = endDate < workingEnd ? endDate : workingEnd;
         slices.push({
           event,
           sliceStart,
           sliceEnd,
-          continuesFromPrev: startDate < dayStart,
-          continuesToNext: endDate > dayEnd,
+          continuesFromPrev: startDate < workingStart,
+          continuesToNext: endDate > workingEnd,
         });
       });
     });
@@ -1535,6 +1613,18 @@ export default function CalendarApp() {
 
     return map;
   }, [events, weekDays, minutesPerDay, visibleCalendarIds]);
+
+  const taskProgress = useMemo(() => {
+    const progress = new Map<string, { total: number; done: number }>();
+    events.forEach((event) => {
+      if (!event.taskId) return;
+      const entry = progress.get(event.taskId) ?? { total: 0, done: 0 };
+      entry.total += 1;
+      if (event.done) entry.done += 1;
+      progress.set(event.taskId, entry);
+    });
+    return progress;
+  }, [events]);
   const dayPreferenceOptions = useMemo(() => {
     const todayStart = startOfDay(new Date());
     return Array.from({ length: 7 }, (_, offset) => {
@@ -1629,7 +1719,6 @@ export default function CalendarApp() {
       daySlices={daySlices}
       day={day}
       todayKey={todayKey}
-      dateToMinutes={dateToMinutes}
       dayStartHour={dayStartHour}
       minutesPerDay={minutesPerDay}
       minuteUnit={minuteUnit}
@@ -1662,8 +1751,11 @@ export default function CalendarApp() {
       timeColumnWidth={timeColumnWidth}
       now={now}
       familyCardStyle={familyCardStyle}
+      taskProgress={taskProgress}
+      onTaskEventDone={handleTaskEventDone}
+      onTaskEventUndone={handleTaskEventUndone}
     />
-  );;
+  );
 ;
 
   // small runtime asserts
@@ -1680,6 +1772,7 @@ export default function CalendarApp() {
   const [headerOffset, setHeaderOffset] = useState(0);
 
   useEffect(() => {
+    if (autoScrolledRef.current) return;
     const isScrollable = (el: HTMLElement | null) => {
       if (!el) return false;
       const style = getComputedStyle(el);
@@ -1730,6 +1823,7 @@ export default function CalendarApp() {
     const t1 = window.setTimeout(doScroll, 150);
     const t2 = window.setTimeout(doScroll, 400);
     const t3 = window.setTimeout(doScroll, 1000);
+    autoScrolledRef.current = true;
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
@@ -1773,18 +1867,30 @@ export default function CalendarApp() {
         />
       </div>
 
+      <div className="border-b border-white/10 bg-[#111113]/35">
+        <div className="px-6 py-4">
+          <AddTaskForm
+            onSubmit={handleAddTaskSubmit}
+            fieldClasses={fieldClasses}
+            actionButtonClasses={actionButtonClasses}
+          />
+          {taskStatus && <p className="mt-2 text-sm text-emerald-300">{taskStatus}</p>}
+        </div>
+      </div>
+
       <CalendarGrid
         ref={calendarSwipeRef}
         weekDays={weekDays}
         today={now}
         dayStartHour={dayStartHour}
         dayEndHour={dayEndHour}
-        minuteUnit={minuteUnit}
-        dayColumnHeight={dayColumnHeight}
-        renderDayColumn={renderDayColumn}
-        timeColumnWidth={timeColumnWidth}
-        headerOffset={headerOffset}
-      />
+      minuteUnit={minuteUnit}
+      dayColumnHeight={dayColumnHeight}
+      renderDayColumn={renderDayColumn}
+      timeColumnWidth={timeColumnWidth}
+      headerOffset={headerOffset}
+      columnOffset={DAY_COLUMN_OFFSET}
+    />
 
       {/* Drawer Form */}
       {showForm && draft && (
@@ -2159,3 +2265,6 @@ export default function CalendarApp() {
     </div>
   );
 }
+
+
+

@@ -1,5 +1,5 @@
 import { memo } from "react";
-import type { CalendarInfo, CalendarInfoMap } from "../types";
+import type { CalendarInfo, CalendarInfoMap } from "../domain";
 
 type CalendarsPanelProps = {
   calendars: CalendarInfo[];

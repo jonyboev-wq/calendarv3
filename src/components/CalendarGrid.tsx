@@ -11,6 +11,7 @@ type CalendarGridProps = {
   renderDayColumn: (day: Date) => JSX.Element;
   timeColumnWidth?: number;
   headerOffset: number;
+  columnOffset?: number;
 };
 
 export const CalendarGrid = forwardRef<HTMLDivElement, CalendarGridProps>(function CalendarGrid(
@@ -24,6 +25,7 @@ export const CalendarGrid = forwardRef<HTMLDivElement, CalendarGridProps>(functi
     renderDayColumn,
     timeColumnWidth = 80,
     headerOffset,
+    columnOffset = 0,
   },
   ref
 ) {
@@ -67,7 +69,11 @@ export const CalendarGrid = forwardRef<HTMLDivElement, CalendarGridProps>(functi
             {Array.from({ length: (dayEndHour - dayStartHour) * 60 }, (_, i) => i)
               .filter((m) => m % 60 === 0)
               .map((m) => (
-                <div key={m} className="absolute left-0 w-full pr-2 text-xs text-gray-400" style={{ top: m * minuteUnit }}>
+                <div
+                  key={m}
+                  className="absolute left-0 w-full pr-2 text-xs text-gray-400"
+                  style={{ top: columnOffset + m * minuteUnit }}
+                >
                   {String(dayStartHour + m / 60).padStart(2, "0")}:00
                 </div>
               ))}

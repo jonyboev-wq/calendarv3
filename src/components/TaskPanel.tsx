@@ -1,13 +1,15 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import type {
   CalendarInfo,
-  EventItem,
+  CalendarEvent,
   TaskAssignment,
   TaskCreateInput,
   TaskCreateResult,
-} from "../types";
+} from "../domain";
 import { fmtDay, fmtHM, parseISOorNull, diffMinutes } from "../utils/date";
 import { familyBadgeColor, familyLabel } from "../utils/family";
+
+type EventItem = CalendarEvent;
 
 type TaskPanelProps = {
   tasks: TaskAssignment[];

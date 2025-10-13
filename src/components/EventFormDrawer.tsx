@@ -1,6 +1,9 @@
 import { memo, type Dispatch, type SetStateAction } from "react";
-import type { CalendarInfo, EventItem, FamilyKey } from "../types";
+import type { CalendarInfo, CalendarEvent } from "../domain";
+import type { FamilyKey } from "../types";
 import { parseISOorNull, fromLocalInput, toLocalInputValue, addMinutes, startOfDay } from "../utils/date";
+
+type EventItem = CalendarEvent;
 
 type EventFormDrawerProps = {
   draft: Partial<EventItem>;
@@ -47,7 +50,7 @@ export const EventFormDrawer = memo(function EventFormDrawer({
         </div>
         <div className="mt-5 space-y-4">
           <label className="block space-y-1">
-            <span className="text-xs uppercase tracking-wide text-gray-400">Название</span>
+            <span className="text-xs uppercase tracking-wide text-gray-400">Priority (1-5)</span>
             <input
               className={fieldClasses}
               value={draft.title || ""}
@@ -56,7 +59,7 @@ export const EventFormDrawer = memo(function EventFormDrawer({
           </label>
 
           <label className="block space-y-1">
-            <span className="text-xs uppercase tracking-wide text-gray-400">Календарь</span>
+            <span className="text-xs uppercase tracking-wide text-gray-400">Priority (1-5)</span>
             <div className="flex items-center gap-3">
               <span
                 className="h-3 w-3 rounded-full border border-white/20"
@@ -83,7 +86,7 @@ export const EventFormDrawer = memo(function EventFormDrawer({
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <label className="block space-y-1">
-              <span className="text-xs uppercase tracking-wide text-gray-400">Начало</span>
+              <span className="text-xs uppercase tracking-wide text-gray-400">Priority (1-5)</span>
               <input
                 type="datetime-local"
                 className={fieldClasses}
@@ -101,7 +104,7 @@ export const EventFormDrawer = memo(function EventFormDrawer({
               />
             </label>
             <label className="block space-y-1">
-              <span className="text-xs uppercase tracking-wide text-gray-400">Окончание</span>
+              <span className="text-xs uppercase tracking-wide text-gray-400">Priority (1-5)</span>
               <input
                 type="datetime-local"
                 className={fieldClasses}
@@ -125,7 +128,7 @@ export const EventFormDrawer = memo(function EventFormDrawer({
 
           <div className="grid grid-cols-2 gap-4">
             <label className="block space-y-1">
-              <span className="text-xs uppercase tracking-wide text-gray-400">Тип</span>
+              <span className="text-xs uppercase tracking-wide text-gray-400">Priority (1-5)</span>
               <select
                 className={fieldClasses}
                 value={draft.type || "flexible"}
@@ -136,35 +139,43 @@ export const EventFormDrawer = memo(function EventFormDrawer({
               </select>
             </label>
             <label className="block space-y-1">
-              <span className="text-xs uppercase tracking-wide text-gray-400">Приоритет (1–10)</span>
+              <span className="text-xs uppercase tracking-wide text-gray-400">Priority (1-5)</span>
               <input
                 type="number"
                 min={1}
-                max={10}
+                max={5}
                 className={fieldClasses}
-                value={draft.priority ?? 5}
-                onChange={(e) => setDraft((prev) => ({ ...prev!, priority: parseInt(e.target.value || "5", 10) }))}
+                value={draft.priority ?? 3}
+                onChange={(e) =>
+                  setDraft((prev) => {
+                    const nextPriority = Math.max(
+                      1,
+                      Math.min(5, Number(e.target.value) || 3),
+                    ) as EventItem["priority"];
+                    return { ...prev!, priority: nextPriority };
+                  })
+                }
               />
             </label>
           </div>
 
           <label className="block space-y-1">
-            <span className="text-xs uppercase tracking-wide text-gray-400">Семейство</span>
+            <span className="text-xs uppercase tracking-wide text-gray-400">Category</span>
             <select
               className={fieldClasses}
-              value={(draft.family as FamilyKey) || "other"}
+              value={(draft.family as FamilyKey) || "home"}
               onChange={(e) => setDraft((prev) => ({ ...prev!, family: e.target.value as FamilyKey }))}
             >
-              <option value="study">Учёба</option>
-              <option value="work">Работа</option>
-              <option value="health">Здоровье</option>
-              <option value="life">Быт/Личное</option>
-              <option value="other">Другое</option>
+              <option value="study">Study</option>
+              <option value="work">Work</option>
+              <option value="training">Training</option>
+              <option value="home">Home</option>
+              
             </select>
           </label>
 
           <label className="block space-y-1">
-            <span className="text-xs uppercase tracking-wide text-gray-400">Заметки</span>
+            <span className="text-xs uppercase tracking-wide text-gray-400">Priority (1-5)</span>
             <textarea
               className={`${fieldClasses} min-h-[120px] resize-none`}
               value={draft.notes || ""}
@@ -226,3 +237,8 @@ export const EventFormDrawer = memo(function EventFormDrawer({
     </div>
   );
 });
+
+
+
+
+
