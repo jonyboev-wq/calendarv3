@@ -1,4 +1,4 @@
-import { memo, type Dispatch, type SetStateAction } from "react";
+import { memo, useState, type Dispatch, type SetStateAction } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { DaySlice, CalendarEvent, CalendarInfoMap } from "../domain";
 import type { TaskEvent } from "../types";
@@ -17,6 +17,7 @@ export type DayColumnProps = {
   minutesPerDay: number;
   minuteUnit: number;
   dayColumnHeight: number;
+  weekDays: Date[];
   dragPreview: { id: string; dayKey: string; startMinutes: number } | null;
   setDragState: (state: DragState) => void;
   setDragPreview: (preview: DayColumnProps["dragPreview"]) => void;
@@ -44,6 +45,8 @@ export type DayColumnProps = {
   DAY_COLUMN_OFFSET: number;
   timeColumnWidth: number;
   now: Date;
+  onMoveEventToDay: (eventId: string, day: Date) => void;
+  onMoveEventByOffset: (eventId: string, offset: number) => void;
   familyCardStyle: (family: EventItem["family"], fixed: boolean) => string;
   taskProgress: Map<string, { total: number; done: number }>;
   onTaskEventDone: (eventId: string) => void;
@@ -58,6 +61,7 @@ export const DayColumn = memo(function DayColumn({
   minutesPerDay,
   minuteUnit,
   dayColumnHeight,
+  weekDays,
   dragPreview,
   setDragState,
   setDragPreview,
@@ -85,6 +89,8 @@ export const DayColumn = memo(function DayColumn({
   DAY_COLUMN_OFFSET,
   timeColumnWidth,
   now,
+  onMoveEventToDay,
+  onMoveEventByOffset,
   familyCardStyle,
   taskProgress,
   onTaskEventDone,
@@ -159,6 +165,7 @@ export const DayColumn = memo(function DayColumn({
           dragPreview={dragPreview}
           setDragState={setDragState}
           setDragPreview={setDragPreview}
+          weekDays={weekDays}
           draggingRef={draggingRef}
           suppressClickRef={suppressClickRef}
           dragPointerRef={dragPointerRef}
@@ -178,6 +185,8 @@ export const DayColumn = memo(function DayColumn({
           setShowForm={setShowForm}
           setDraft={setDraft}
           optimizeDay={optimizeDay}
+          onMoveEventToDay={onMoveEventToDay}
+          onMoveEventByOffset={onMoveEventByOffset}
           now={now}
           taskProgress={taskProgress}
           onTaskEventDone={onTaskEventDone}
@@ -197,6 +206,7 @@ type EventSliceCardProps = {
   dragPreview: DayColumnProps["dragPreview"];
   setDragState: DayColumnProps["setDragState"];
   setDragPreview: DayColumnProps["setDragPreview"];
+  weekDays: Date[];
   draggingRef: DayColumnProps["draggingRef"];
   suppressClickRef: DayColumnProps["suppressClickRef"];
   dragPointerRef: DayColumnProps["dragPointerRef"];
@@ -216,6 +226,8 @@ type EventSliceCardProps = {
   setShowForm: DayColumnProps["setShowForm"];
   setDraft: DayColumnProps["setDraft"];
   optimizeDay: DayColumnProps["optimizeDay"];
+  onMoveEventToDay: DayColumnProps["onMoveEventToDay"];
+  onMoveEventByOffset: DayColumnProps["onMoveEventByOffset"];
   now: Date;
   taskProgress: Map<string, { total: number; done: number }>;
   onTaskEventDone: (eventId: string) => void;
@@ -231,6 +243,7 @@ const EventSliceCard = memo(function EventSliceCard({
   dragPreview,
   setDragState,
   setDragPreview,
+  weekDays,
   draggingRef,
   suppressClickRef,
   dragPointerRef,
@@ -250,6 +263,8 @@ const EventSliceCard = memo(function EventSliceCard({
   setShowForm,
   setDraft,
   optimizeDay,
+  onMoveEventToDay,
+  onMoveEventByOffset,
   now,
   taskProgress,
   onTaskEventDone,
@@ -268,6 +283,7 @@ const EventSliceCard = memo(function EventSliceCard({
   const taskTotal = isTaskEvent ? Math.max(1, rawTaskTotal) : rawTaskTotal;
   const taskDoneCount = taskStats?.done ?? (isTaskEvent && isTaskDone ? 1 : 0);
   const canAddTask = !isTaskEvent && eventStart.getTime() > nowTime;
+  const [customDayValue, setCustomDayValue] = useState("");
   const workingStartForEvent = new Date(dayStart);
   workingStartForEvent.setHours(dayStartHour, 0, 0, 0);
   const sliceStartMinutes = Math.max(0, diffMinutes(slice.sliceStart, workingStartForEvent));
@@ -283,12 +299,17 @@ const EventSliceCard = memo(function EventSliceCard({
   const meta = extractEventMeta(e.notes);
   const isActive = activeEventId === e.id;
   const canDrag = !isFixed && !slice.continuesFromPrev;
+  const canMoveAcrossDays = canDrag;
   const isPreviewed = dragPreview && dragPreview.id === e.id && dragPreview.dayKey === dayStart.toISOString();
   const baseZIndex = isFixed ? 20 : 15;
   const zIndex = isActive ? 60 : isPreviewed ? 50 : baseZIndex;
   const calendarInfo = calendarMap.get(e.calendarId);
   const calendarColor = calendarInfo?.color ?? "#6b7280";
   const calendarName = calendarInfo?.name ?? "Календарь";
+  const eventDayKey = startOfDay(eventStart).toISOString();
+  const weekDayOptions = weekDays.filter((day) => day.toISOString() !== eventDayKey);
+  const moveButtonClasses =
+    "pressable flex-1 rounded-lg border border-white/12 bg-white/5 px-2 py-1 text-[11px] text-gray-100 transition hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 disabled:opacity-50 disabled:cursor-not-allowed";
   const interactiveClasses = canDrag
     ? "cursor-pointer transition-transform duration-200 ease-out hover:-translate-y-0.5 group"
     : isFixed
@@ -340,6 +361,32 @@ const EventSliceCard = memo(function EventSliceCard({
       ev.preventDefault();
       setActiveEventId((prev) => (prev === e.id ? null : e.id));
     }
+  };
+
+  const handleMoveByOffset = (offset: number) => {
+    if (!canMoveAcrossDays || offset === 0) return;
+    onMoveEventByOffset(e.id, offset);
+    setActiveEventId(null);
+    setCustomDayValue("");
+  };
+
+  const handleMoveToDay = (target: Date | null) => {
+    if (!target || !canMoveAcrossDays) return;
+    onMoveEventToDay(e.id, target);
+    setActiveEventId(null);
+    setCustomDayValue("");
+  };
+
+  const parseDateOnly = (value: string): Date | null => {
+    if (!value) return null;
+    const parts = value.split("-");
+    if (parts.length !== 3) return null;
+    const [y, m, d] = parts.map((part) => Number.parseInt(part, 10));
+    if (![y, m, d].every((num) => Number.isFinite(num))) return null;
+    const result = new Date();
+    result.setFullYear(y, m - 1, d);
+    result.setHours(0, 0, 0, 0);
+    return result;
   };
 
   return (
@@ -539,6 +586,84 @@ const EventSliceCard = memo(function EventSliceCard({
           <span className="rounded-lg border border-white/15 px-2 py-1">Приоритет: {e.priority}</span>
           <span className="rounded-lg border border-white/15 px-2 py-1">Тип: {isFixed ? "Жёсткое" : "Гибкое"}</span>
         </div>
+        {canMoveAcrossDays && (
+          <div className="mt-3 space-y-2 rounded-xl border border-white/10 bg-white/5 p-2">
+            <div className="text-[10px] uppercase tracking-[0.08em] text-gray-400">���������� �� ����</div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={moveButtonClasses}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  handleMoveByOffset(-1);
+                }}
+              >
+                ← ���������
+              </button>
+              <button
+                className={moveButtonClasses}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  handleMoveByOffset(1);
+                }}
+              >
+                ��������� →
+              </button>
+            </div>
+            {weekDayOptions.length > 0 && (
+              <label className="flex flex-col gap-1 text-[11px] text-gray-300">
+                <span className="uppercase tracking-wide text-[10px] text-gray-400">������ �������</span>
+                <select
+                  className="rounded-lg border border-white/12 bg-black/40 px-2 py-1 text-[11px] text-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+                  defaultValue=""
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => {
+                    event.stopPropagation();
+                    const value = event.target.value;
+                    if (!value) return;
+                    const parsed = parseISOorNull(value);
+                    event.target.value = "";
+                    if (!parsed) return;
+                    handleMoveToDay(startOfDay(parsed));
+                  }}
+                >
+                  <option value="" disabled>
+                    ������� ����
+                  </option>
+                  {weekDayOptions.map((dayOption) => (
+                    <option key={dayOption.toISOString()} value={dayOption.toISOString()}>
+                      {fmtDay(dayOption)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="date"
+                className="min-w-[130px] flex-1 rounded-lg border border-white/12 bg-black/40 px-2 py-1 text-[11px] text-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+                value={customDayValue}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => {
+                  event.stopPropagation();
+                  setCustomDayValue(event.target.value);
+                }}
+              />
+              <button
+                className={moveButtonClasses}
+                disabled={!customDayValue}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (!customDayValue) return;
+                  const resolved = parseDateOnly(customDayValue);
+                  if (!resolved) return;
+                  handleMoveToDay(resolved);
+                }}
+              >
+                ��������
+              </button>
+            </div>
+          </div>
+        )}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
                 className="pressable rounded-lg border border-white/10 bg-white/10 px-2 py-1 text-[11px] text-gray-100"

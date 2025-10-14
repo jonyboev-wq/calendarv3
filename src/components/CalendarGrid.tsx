@@ -29,6 +29,8 @@ export const CalendarGrid = forwardRef<HTMLDivElement, CalendarGridProps>(functi
   },
   ref
 ) {
+  const totalHours = Math.max(1, dayEndHour - dayStartHour);
+  const hourHeight = minuteUnit * 60;
   const headerStyle: CSSProperties = {
     position: "sticky",
     top: Math.max(0, headerOffset),
@@ -66,18 +68,34 @@ export const CalendarGrid = forwardRef<HTMLDivElement, CalendarGridProps>(functi
             );
           })}
           <div className="relative">
-            {Array.from({ length: (dayEndHour - dayStartHour) * 60 }, (_, i) => i)
-              .filter((m) => m % 60 === 0)
-              .map((m) => (
+            {Array.from({ length: totalHours }, (_, index) => {
+              const top = columnOffset + index * hourHeight;
+              return (
                 <div
-                  key={m}
+                  key={`hour-bg-${index}`}
+                  className="pointer-events-none absolute inset-x-0"
+                  style={{
+                    top,
+                    height: hourHeight,
+                    backgroundColor: index % 2 === 0 ? "rgba(255,255,255,0.01)" : "rgba(255,255,255,0.02)",
+                    zIndex: 1,
+                  }}
+                />
+              );
+            })}
+            {Array.from({ length: totalHours + 1 }, (_, index) => {
+              const top = columnOffset + index * hourHeight;
+              return (
+                <div
+                  key={`hour-label-${index}`}
                   className="absolute left-0 w-full pr-2 text-xs text-gray-400"
-                  style={{ top: columnOffset + m * minuteUnit }}
+                  style={{ top, transform: "translateY(-50%)", zIndex: 5 }}
                 >
-                  {String(dayStartHour + m / 60).padStart(2, "0")}:00
+                  {String(dayStartHour + index).padStart(2, "0")}:00
                 </div>
-              ))}
-            <div style={{ height: dayColumnHeight }}></div>
+              );
+            })}
+            <div style={{ height: columnOffset + dayColumnHeight }}></div>
           </div>
 
           {weekDays.map((day) => renderDayColumn(day))}

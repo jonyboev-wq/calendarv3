@@ -7,8 +7,7 @@ import { EventFormDrawer } from "./components/EventFormDrawer";
 import { ImportPanel } from "./components/ImportPanel";
 import { CalendarsPanel } from "./components/CalendarsPanel";
 import { TaskPanel } from "./components/TaskPanel";
-import { AddTaskForm } from "./components/AddTaskForm";
-import type { FamilyKey, Task as StoredTask, TaskEvent } from "./types";
+import type { FamilyKey, TaskEvent } from "./types";
 import type {
   CalendarInfo,
   CalendarEvent,
@@ -38,7 +37,7 @@ import {
 } from "./utils/date";
 import { familyLabel, familyCardStyle } from "./utils/family";
 import { extractEventMeta } from "./utils/events";
-import { createTask, markTaskEventDone, markTaskEventUndone } from "./taskService";
+import { markTaskEventDone, markTaskEventUndone } from "./taskService";
 
 const DEFAULT_CALENDAR_ID = "cal-default";
 
@@ -65,6 +64,7 @@ const EVENTS_STORAGE_KEY = "mycalendar.events";
 const TASK_STORAGE_KEY = "mycalendar.taskAssignments";
 
 const FAMILY_VALUES: FamilyKey[] = ["study", "work", "training", "home"];
+const FLEX_EVENT_GAP_MINUTES = 10;
 
 const sanitizeEvents = (raw: unknown): CalendarEvent[] => {
   const arr = Array.isArray(raw) ? (raw as any[]) : [];
@@ -1515,27 +1515,6 @@ export default function CalendarApp() {
     setImportMessage(null);
     setImportCalendarId(activeCalendarId);
   };
-  const handleAddTaskSubmit = useCallback(
-    async (input: Omit<StoredTask, "id" | "parts">) => {
-      try {
-        const result = createTask(input, { events });
-        refreshEventsFromStorage();
-        const slots = result.newEvents.length;
-        const slotLabel =
-          slots % 10 === 1 && slots % 100 !== 11
-            ? "слот"
-            : slots % 10 >= 2 && slots % 10 <= 4 && (slots % 100 < 10 || slots % 100 >= 20)
-            ? "слота"
-            : "слотов";
-        setTaskStatus(`Задача "${result.task.title}" запланирована (${slots} ${slotLabel}).`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Не удалось создать задачу.";
-        setTaskStatus(message);
-        throw (error instanceof Error ? error : new Error(message));
-      }
-    },
-    [events, refreshEventsFromStorage]
-  );
   const handleTaskEventDone = useCallback(
     (eventId: string) => {
       try {
@@ -1565,8 +1544,8 @@ export default function CalendarApp() {
   const handleToggleCalendarVisibility = (id: string, visible: boolean) => {
     patchCalendar(id, { visible });
   };
-  const dayStartHour = TASK_DAY_START_HOUR;
-  const dayEndHour = TASK_DAY_END_HOUR;
+  const dayStartHour = 0;
+  const dayEndHour = 24;
   const timeColumnWidth = 80;
   const minutesPerDay = (dayEndHour - dayStartHour) * 60;
   const minuteUnit = 1;
@@ -1650,28 +1629,200 @@ export default function CalendarApp() {
     return addMinutes(base, minutes);
   };
 
+  const findAvailableStartMinutes = useCallback(
+    (day: Date, requestedStartMinutes: number, durationMinutes: number, eventId: string): number | null => {
+      const normalizedDay = startOfDay(day);
+      const sanitizedDuration = Math.max(1, Math.round(durationMinutes));
+      if (sanitizedDuration >= minutesPerDay) return 0;
+      const workingStart = addMinutes(normalizedDay, dayStartHour * 60);
+      const workingEnd = addMinutes(workingStart, minutesPerDay);
+
+      const rawIntervals = events
+        .map((ev) => {
+          if (ev.id === eventId) return null;
+          const evStart = parseISOorNull(ev.start);
+          const evEnd = parseISOorNull(ev.end);
+          if (!evStart || !evEnd) return null;
+          if (evEnd <= workingStart || evStart >= workingEnd) return null;
+          const overlapStartMs = Math.max(workingStart.getTime(), evStart.getTime());
+          const overlapEndMs = Math.min(workingEnd.getTime(), evEnd.getTime());
+          if (overlapEndMs <= overlapStartMs) return null;
+          const startMinutes = Math.max(
+            0,
+            Math.round((overlapStartMs - workingStart.getTime()) / 60000)
+          );
+          const endMinutes = Math.min(
+            minutesPerDay,
+            Math.round((overlapEndMs - workingStart.getTime()) / 60000)
+          );
+          return { start: Math.max(0, startMinutes), end: Math.max(startMinutes, endMinutes) };
+        })
+        .filter((interval): interval is { start: number; end: number } => interval != null)
+        .sort((a, b) => a.start - b.start)
+        .map(({ start, end }) => ({
+          start: Math.max(0, start - FLEX_EVENT_GAP_MINUTES),
+          end: Math.min(minutesPerDay, end + FLEX_EVENT_GAP_MINUTES),
+        }));
+
+      const mergedIntervals: { start: number; end: number }[] = [];
+      for (const interval of rawIntervals) {
+        const last = mergedIntervals[mergedIntervals.length - 1];
+        if (last && interval.start <= last.end) {
+          last.end = Math.max(last.end, interval.end);
+        } else {
+          mergedIntervals.push({ ...interval });
+        }
+      }
+
+      const clampCandidate = (value: number) =>
+        Math.max(0, Math.min(value, minutesPerDay - sanitizedDuration));
+
+      const scan = (initial: number): number | null => {
+        let candidate = clampCandidate(initial);
+        for (const interval of mergedIntervals) {
+          if (candidate + sanitizedDuration <= interval.start) {
+            continue;
+          }
+          if (candidate >= interval.end) {
+            continue;
+          }
+          candidate = interval.end;
+          if (candidate > minutesPerDay - sanitizedDuration) {
+            return null;
+          }
+        }
+        return candidate + sanitizedDuration <= minutesPerDay ? candidate : null;
+      };
+
+      const preferred = scan(clampCandidate(Math.round(requestedStartMinutes)));
+      if (preferred != null) return preferred;
+      return scan(0);
+    },
+    [dayStartHour, events, minutesPerDay]
+  );
+
+  const moveFlexibleEventByOffset = useCallback(
+    (id: string, offsetDays: number) => {
+      if (!offsetDays) return;
+      const target = events.find((event) => event.id === id);
+      if (!target || target.type === "fixed") return;
+      const start = parseISOorNull(target.start);
+      const end = parseISOorNull(target.end);
+      if (!start || !end) return;
+      const durationMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
+      const sourceWorkingStart = addMinutes(startOfDay(start), dayStartHour * 60);
+      const originalMinutes = Math.max(
+        0,
+        Math.round((start.getTime() - sourceWorkingStart.getTime()) / 60000)
+      );
+      const targetDay = addMinutes(startOfDay(start), offsetDays * 1440);
+      const adjustedMinutes = findAvailableStartMinutes(targetDay, originalMinutes, durationMinutes, id);
+      if (adjustedMinutes == null) return;
+      const normalizedTargetDay = startOfDay(targetDay);
+      const newStart = minutesToDate(normalizedTargetDay, adjustedMinutes);
+      const newEnd = addMinutes(newStart, durationMinutes);
+      setEvents((prev) =>
+        prev.map((event) =>
+          event.id === id ? { ...event, start: newStart.toISOString(), end: newEnd.toISOString() } : event
+        )
+      );
+    },
+    [dayStartHour, events, findAvailableStartMinutes]
+  );
+
+  const moveFlexibleEventToDay = useCallback(
+    (id: string, targetDayInput: Date) => {
+      const target = events.find((event) => event.id === id);
+      if (!target || target.type === "fixed") return;
+      const start = parseISOorNull(target.start);
+      const end = parseISOorNull(target.end);
+      if (!start || !end) return;
+      const durationMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
+      const sourceWorkingStart = addMinutes(startOfDay(start), dayStartHour * 60);
+      const originalMinutes = Math.max(
+        0,
+        Math.round((start.getTime() - sourceWorkingStart.getTime()) / 60000)
+      );
+      const normalizedTargetDay = startOfDay(targetDayInput);
+      const adjustedMinutes = findAvailableStartMinutes(
+        normalizedTargetDay,
+        originalMinutes,
+        durationMinutes,
+        id
+      );
+      if (adjustedMinutes == null) return;
+      const newStart = minutesToDate(normalizedTargetDay, adjustedMinutes);
+      const newEnd = addMinutes(newStart, durationMinutes);
+      setEvents((prev) =>
+        prev.map((event) =>
+          event.id === id ? { ...event, start: newStart.toISOString(), end: newEnd.toISOString() } : event
+        )
+      );
+    },
+    [dayStartHour, events, findAvailableStartMinutes]
+  );
+
   useEffect(() => {
     if (!dragState) return;
 
-    const computeMinutes = (clientY: number) => {
-      const column = document.querySelector<HTMLElement>(`[data-day='${dragState.dayKey}']`);
+    const computePosition = (clientX: number, clientY: number) => {
+      const fallbackDayKey = dragPreview?.dayKey ?? dragState.dayKey;
+      const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      const column =
+        element?.closest<HTMLElement>("[data-day]") ??
+        (fallbackDayKey ? document.querySelector<HTMLElement>(`[data-day='${fallbackDayKey}']`) : null);
       if (!column) return null;
+      const dayKey = column.dataset.day ?? fallbackDayKey;
+      if (!dayKey) return null;
       const rect = column.getBoundingClientRect();
       const relative = clientY - rect.top - DAY_COLUMN_OFFSET;
       const minute = Math.round(relative / minuteUnit) - dragState.offsetMinutes;
       const snapped = snapToGrid(minute);
       const maxMinutes = minutesPerDay - dragState.duration;
-      return Math.max(0, Math.min(maxMinutes, snapped));
+      const clamped = Math.max(0, Math.min(maxMinutes, snapped));
+      return { dayKey, minutes: clamped };
+    };
+
+    const computeAdjustedPosition = (position: { dayKey: string; minutes: number }) => {
+      const dayDate = new Date(position.dayKey);
+      const normalizedDay = startOfDay(dayDate);
+      const adjustedMinutes = findAvailableStartMinutes(
+        normalizedDay,
+        position.minutes,
+        dragState.duration,
+        dragState.id
+      );
+      if (adjustedMinutes == null) return null;
+      return { dayKey: normalizedDay.toISOString(), minutes: adjustedMinutes };
     };
 
     const handleMove = (ev: PointerEvent) => {
       ev.preventDefault();
-      const minutes = computeMinutes(ev.clientY);
-      if (minutes == null) return;
-      if (minutes !== dragState.originalMinutes) {
+      const position = computePosition(ev.clientX, ev.clientY);
+      if (!position) return;
+      const adjusted = computeAdjustedPosition(position);
+      if (!adjusted) {
+        if (
+          dragPreview?.dayKey !== dragState.dayKey ||
+          dragPreview?.startMinutes !== dragState.originalMinutes
+        ) {
+          setDragPreview({
+            id: dragState.id,
+            dayKey: dragState.dayKey,
+            startMinutes: dragState.originalMinutes,
+          });
+        }
+        return;
+      }
+      if (adjusted.minutes !== dragState.originalMinutes || adjusted.dayKey !== dragState.dayKey) {
         draggingRef.current = true;
       }
-      setDragPreview({ id: dragState.id, dayKey: dragState.dayKey, startMinutes: minutes });
+      if (
+        dragPreview?.dayKey !== adjusted.dayKey ||
+        dragPreview?.startMinutes !== adjusted.minutes
+      ) {
+        setDragPreview({ id: dragState.id, dayKey: adjusted.dayKey, startMinutes: adjusted.minutes });
+      }
     };
 
     const finishDrag = (ev: PointerEvent) => {
@@ -1682,10 +1833,16 @@ export default function CalendarApp() {
         dragPointerRef.current = null;
         dragPointerIdRef.current = null;
       }
-      const minutes = computeMinutes(ev.clientY) ?? dragPreview?.startMinutes ?? dragState.originalMinutes;
-      if (minutes != null && minutes !== dragState.originalMinutes) {
-        const dayDate = new Date(dragState.dayKey);
-        const newStart = minutesToDate(dayDate, minutes);
+      const position =
+        computePosition(ev.clientX, ev.clientY) ??
+        (dragPreview ? { dayKey: dragPreview.dayKey, minutes: dragPreview.startMinutes } : null);
+      const adjusted = position ? computeAdjustedPosition(position) : null;
+      if (
+        adjusted &&
+        (adjusted.minutes !== dragState.originalMinutes || adjusted.dayKey !== dragState.dayKey)
+      ) {
+        const dayDate = new Date(adjusted.dayKey);
+        const newStart = minutesToDate(dayDate, adjusted.minutes);
         const newEnd = addMinutes(newStart, dragState.duration);
         setEvents((prev) =>
           prev.map((item) =>
@@ -1711,7 +1868,7 @@ export default function CalendarApp() {
       window.removeEventListener("pointerup", finishDrag);
       window.removeEventListener("pointercancel", finishDrag);
     };
-  }, [dragState, dragPreview, minuteUnit, minutesPerDay, dayStartHour]);
+  }, [dragPreview, dragState, findAvailableStartMinutes, minuteUnit, minutesPerDay, snapToGrid, dayStartHour]);
 
   const renderDayColumn = (day: Date) => (
     <DayColumn
@@ -1723,6 +1880,7 @@ export default function CalendarApp() {
       minutesPerDay={minutesPerDay}
       minuteUnit={minuteUnit}
       dayColumnHeight={dayColumnHeight}
+      weekDays={weekDays}
       dragPreview={dragPreview}
       setDragState={setDragState}
       setDragPreview={setDragPreview}
@@ -1750,6 +1908,8 @@ export default function CalendarApp() {
       DAY_COLUMN_OFFSET={DAY_COLUMN_OFFSET}
       timeColumnWidth={timeColumnWidth}
       now={now}
+      onMoveEventToDay={moveFlexibleEventToDay}
+      onMoveEventByOffset={moveFlexibleEventByOffset}
       familyCardStyle={familyCardStyle}
       taskProgress={taskProgress}
       onTaskEventDone={handleTaskEventDone}
@@ -1845,11 +2005,11 @@ export default function CalendarApp() {
   return (
     <div className="min-h-screen w-full bg-[#0f0f12] text-gray-100">
       <div ref={headerRef} className="sticky top-0 z-30 border-b border-white/10 bg-[#111113]/45 backdrop-blur-xl">
-        <CalendarHeader
-          navSegmentClasses={navSegmentClasses}
-          actionButtonClasses={actionButtonClasses}
-          subtleButtonClasses={subtleButtonClasses}
-          onPrevWeek={handlePrevWeek}
+      <CalendarHeader
+        navSegmentClasses={navSegmentClasses}
+        actionButtonClasses={actionButtonClasses}
+        subtleButtonClasses={subtleButtonClasses}
+        onPrevWeek={handlePrevWeek}
           onToday={handleToday}
           onNextWeek={handleNextWeek}
           weekLabel={weekLabel}
@@ -1867,23 +2027,18 @@ export default function CalendarApp() {
         />
       </div>
 
-      <div className="border-b border-white/10 bg-[#111113]/35">
-        <div className="px-6 py-4">
-          <AddTaskForm
-            onSubmit={handleAddTaskSubmit}
-            fieldClasses={fieldClasses}
-            actionButtonClasses={actionButtonClasses}
-          />
-          {taskStatus && <p className="mt-2 text-sm text-emerald-300">{taskStatus}</p>}
-        </div>
+    {taskStatus && (
+      <div className="fixed top-4 right-4 z-50 rounded-xl border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-200 shadow-lg">
+        {taskStatus}
       </div>
+    )}
 
-      <CalendarGrid
-        ref={calendarSwipeRef}
-        weekDays={weekDays}
-        today={now}
-        dayStartHour={dayStartHour}
-        dayEndHour={dayEndHour}
+    <CalendarGrid
+      ref={calendarSwipeRef}
+      weekDays={weekDays}
+      today={now}
+      dayStartHour={dayStartHour}
+      dayEndHour={dayEndHour}
       minuteUnit={minuteUnit}
       dayColumnHeight={dayColumnHeight}
       renderDayColumn={renderDayColumn}
@@ -2265,6 +2420,7 @@ export default function CalendarApp() {
     </div>
   );
 }
+
 
 
 
